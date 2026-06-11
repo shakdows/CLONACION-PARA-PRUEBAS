@@ -112,6 +112,53 @@ function metaDe(nombre){
   return m ? m.meta : 0;
 }
 
+/* ===== PERIODO ANTERIOR Y PROYECCIÓN =====
+   Utilidades para los deltas automáticos de los KPIs (vs periodo anterior de
+   igual duración) y la proyección de cierre de mes según el ritmo diario. */
+function rangoDe(rows){
+  if(!rows.length) return null;
+  let min=rows[0].f, max=rows[0].f;
+  rows.forEach(r=>{ if(r.f<min)min=r.f; if(r.f>max)max=r.f; });
+  return {min,max};
+}
+function addDays(dStr,n){
+  const d=new Date(dStr+'T00:00:00'); d.setDate(d.getDate()+n);
+  return d.toISOString().slice(0,10);
+}
+function fmtDia(d){ return d.slice(8)+' '+MES[+d.slice(5,7)-1]; }
+// filas del periodo inmediatamente anterior de igual duración (respeta los
+// demás filtros pero no el rango de fecha global); null si no hay datos previos
+function prevPeriodRows(rows){
+  const rg=rangoDe(rows); if(!rg) return null;
+  const nDias=Math.round((new Date(rg.max+'T00:00:00')-new Date(rg.min+'T00:00:00'))/864e5)+1;
+  const pD2=addDays(rg.min,-1), pD1=addDays(rg.min,-nDias);
+  const prev=filterNonDate().filter(r=>r.f>=pD1&&r.f<=pD2);
+  return prev.length ? {rows:prev, d1:pD1, d2:pD2, nDias} : null;
+}
+function deltaBadge(cur,prev,invert){
+  if(prev==null||prev===0) return '';
+  const d=(cur-prev)/Math.abs(prev)*100;
+  const up=d>0.5, down=d<-0.5;
+  const good=invert?down:up, bad=invert?up:down;
+  const cls=good?'up':bad?'down':'flat';
+  const arr=up?'▲':down?'▼':'■';
+  return `<span class="kdelta ${cls}" title="vs periodo anterior de igual duración">${arr} ${d>0?'+':''}${d.toFixed(1)}%</span>`;
+}
+// proyección al cierre del mes del último día con datos, al ritmo diario promedio
+function proyeccionDe(rows){
+  const rg=rangoDe(rows); if(!rg) return null;
+  const last=new Date(rg.max+'T00:00:00');
+  const eomD=new Date(last.getFullYear(), last.getMonth()+1, 0);
+  const eom=`${eomD.getFullYear()}-${String(eomD.getMonth()+1).padStart(2,'0')}-${String(eomD.getDate()).padStart(2,'0')}`;
+  const diasTrans=Math.round((last-new Date(rg.min+'T00:00:00'))/864e5)+1;
+  const diasRest=Math.round((eomD-last)/864e5);
+  const venta=sum(rows,'tv'), margen=sum(rows,'m');
+  const ritmoDia=venta/diasTrans;
+  return { min:rg.min, max:rg.max, eom, diasTrans, diasRest, venta, margen, ritmoDia,
+    ventaProy: venta + ritmoDia*diasRest,
+    margenProy: margen + (margen/diasTrans)*diasRest };
+}
+
 /* ---- formatters ---- */
 const fUSD = n => '$'+(n||0).toLocaleString('en-US',{maximumFractionDigits:0});
 const fUSD2 = n => '$'+(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -216,16 +263,27 @@ function renderKPIs(rows){
   const cobertura = metaTotal ? ventaConMeta/metaTotal*100 : 0;
   const cobColor = cobertura>=100?C.green : cobertura>=70?C.amber : C.red;
   const cobBg = cobertura>=100?'#e9f9f1' : cobertura>=70?'#fff7ea' : '#ffe9ec';
+  // deltas automáticos vs periodo anterior de igual duración (si hay datos previos)
+  const prev = prevPeriodRows(rows);
+  let dVenta='',dMargen='',dCosto='',dDocs='',dClis='';
+  if(prev){
+    const p=prev.rows;
+    dVenta = deltaBadge(venta, sum(p,'tv'));
+    dMargen= deltaBadge(margen, sum(p,'m'));
+    dCosto = deltaBadge(costo, sum(p,'tc'), true);
+    dDocs  = deltaBadge(docs, new Set(p.map(r=>r.nd)).size);
+    dClis  = deltaBadge(clis, new Set(p.map(r=>r.cl)).size);
+  }
   const k = [
-    {l:'Venta total',v:fUSD(venta),s:`${fNum(rows.length)} líneas · ${fNum(cant)} u.`,c:C.amber,bg:'#fff7ea',
+    {l:'Venta total',v:fUSD(venta),dl:dVenta,s:`${fNum(rows.length)} líneas · ${fNum(cant)} u.`,c:C.amber,bg:'#fff7ea',
       i:'<path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>'},
-    {l:'Margen total',v:fUSD(margen),s:`Margen <b>${fPct(mPct)}</b>`,c:C.green,bg:'#e9f9f1',
+    {l:'Margen total',v:fUSD(margen),dl:dMargen,s:`Margen <b>${fPct(mPct)}</b>`,c:C.green,bg:'#e9f9f1',
       i:'<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>'},
-    {l:'Costo total',v:fUSD(costo),s:'Costo de mercadería',c:C.red,bg:'#ffe9ec',
+    {l:'Costo total',v:fUSD(costo),dl:dCosto,s:'Costo de mercadería',c:C.red,bg:'#ffe9ec',
       i:'<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/>'},
-    {l:'Documentos',v:fNum(docs),s:`Ticket prom. <b>${fUSD2(ticket)}</b>`,c:C.blue,bg:'#eaf1ff',
+    {l:'Documentos',v:fNum(docs),dl:dDocs,s:`Ticket prom. <b>${fUSD2(ticket)}</b>`,c:C.blue,bg:'#eaf1ff',
       i:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'},
-    {l:'Clientes activos',v:fNum(clis),s:`${(venta/Math.max(clis,1)).toLocaleString('en-US',{maximumFractionDigits:0,style:'currency',currency:'USD'})} / cliente`,c:C.violet,bg:'#f1ecff',
+    {l:'Clientes activos',v:fNum(clis),dl:dClis,s:`${(venta/Math.max(clis,1)).toLocaleString('en-US',{maximumFractionDigits:0,style:'currency',currency:'USD'})} / cliente`,c:C.violet,bg:'#f1ecff',
       i:'<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/>'},
     {l:'Cobertura de metas',v:fPct(cobertura),s:`<b>${fUSD(ventaConMeta)}</b> de ${fUSD(metaTotal)}`,c:cobColor,bg:cobBg,
       i:'<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>'},
@@ -236,9 +294,14 @@ function renderKPIs(rows){
         <div class="klbl">${x.l}</div>
         <div class="kico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${x.i}</svg></div>
       </div>
-      <div class="kval">${x.v}</div>
+      <div class="kval">${x.v}${x.dl||''}</div>
       <div class="ksub">${x.s}</div>
     </div>`).join('');
+  // nota de referencia del comparativo (una sola vez, bajo los KPIs)
+  const note=$('#kpiNote');
+  if(note) note.innerHTML = prev
+    ? `Las flechas ▲▼ comparan contra el <b>periodo anterior de igual duración</b> (${fmtDia(prev.d1)} — ${fmtDia(prev.d2)})`
+    : '';
 }
 
 /* ===== CHARTS ===== */
@@ -293,10 +356,24 @@ function renderCumul(rows){
   const {labels,data}=bucketTime(rows,'d');
   let av=0,am=0; const cv=[],cm=[];
   data.forEach(d=>{av+=d.tv;am+=d.m;cv.push(+av.toFixed(2));cm.push(+am.toFixed(2));});
-  mk('#cCumul',{type:'line',data:{labels,datasets:[
+  // proyección de cierre de mes: línea punteada que extiende el acumulado al ritmo diario actual
+  const labs=labels.slice(); const dsets=[];
+  const pro=proyeccionDe(rows);
+  if(pro && pro.diasRest>0 && pro.diasRest<=31 && cv.length>2){
+    const proj=new Array(cv.length-1).fill(null); proj.push(cv[cv.length-1]);
+    for(let k=1;k<=pro.diasRest;k++){
+      const d=addDays(pro.max,k);
+      labs.push(d.slice(8)+'/'+d.slice(5,7));
+      proj.push(+(pro.venta+pro.ritmoDia*k).toFixed(0));
+    }
+    dsets.push({label:'Proyección cierre de mes',data:proj,borderColor:C.amberD,borderWidth:2,
+      borderDash:[5,5],tension:0,fill:false,pointRadius:0,pointHoverRadius:5});
+  }
+  mk('#cCumul',{type:'line',data:{labels:labs,datasets:[
     {label:'Venta acum.',data:cv,borderColor:C.amber,borderWidth:2.5,tension:.3,fill:true,pointRadius:0,pointHoverRadius:5,
       backgroundColor:ctx=>{const c=ctx.chart.ctx.createLinearGradient(0,0,0,300);c.addColorStop(0,C.amber+'2e');c.addColorStop(1,C.amber+'03');return c;}},
-    {label:'Margen acum.',data:cm,borderColor:C.green,borderWidth:2.5,tension:.3,fill:false,pointRadius:0,pointHoverRadius:5,borderDash:[5,4]}]},
+    {label:'Margen acum.',data:cm,borderColor:C.green,borderWidth:2.5,tension:.3,fill:false,pointRadius:0,pointHoverRadius:5,borderDash:[5,4]},
+    ...dsets]},
     options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
       plugins:{legend:{display:false},
         tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${fUSD2(c.parsed.y)}`}}},
@@ -1156,14 +1233,23 @@ function renderMetas(rows){
   const ventaTotal=arr.reduce((a,x)=>a+x.venta,0);  // suma TODA la venta del equipo (con y sin meta)
   const pctGlobal=metaTotal? ventaTotal/metaTotal*100 : 0;
   const cumplieron=conMeta.filter(x=>x.pct>=100).length;
+  // proyección de cierre de mes al ritmo actual (responde "¿vamos a llegar?")
+  const pro=proyeccionDe(rows);
   const st=$('#metaStats');
   if(st){
-    st.innerHTML = [
+    const stats = [
       {l:'Meta total del equipo', v:fUSD(metaTotal), c:'var(--ink)'},
       {l:'Venta acumulada', v:fUSD(ventaTotal), c:'var(--amber-d)'},
       {l:'Cobertura global', v:pctGlobal.toFixed(0)+'%', c: pctGlobal>=100?'var(--emerald-d)':pctGlobal>=70?'var(--amber-d)':'var(--rose)'},
       {l:'Metas cumplidas', v:cumplieron+' de '+conMeta.length, c:'var(--ink)'},
-    ].map(s=>`<div class="meta-stat"><div class="ml">${s.l}</div><div class="mv" style="color:${s.c}">${s.v}</div></div>`).join('');
+    ];
+    if(pro && pro.diasRest>0 && metaTotal>0){
+      const cobProy = pro.ventaProy/metaTotal*100;
+      const cProy = cobProy>=100?'var(--emerald-d)':cobProy>=85?'var(--amber-d)':'var(--rose)';
+      stats.push({l:'Proyección de cierre', v:fUSD(pro.ventaProy), c:cProy});
+      stats.push({l:'Cobertura proyectada', v:cobProy.toFixed(0)+'%', c:cProy});
+    }
+    st.innerHTML = stats.map(s=>`<div class="meta-stat"><div class="ml">${s.l}</div><div class="mv" style="color:${s.c}">${s.v}</div></div>`).join('');
   }
   // tarjetas
   const list=$('#metaList');
@@ -1176,8 +1262,19 @@ function renderMetas(rows){
       const pctTxt = x.pct===null ? 'Sin meta' : x.pct.toFixed(0)+'%';
       const badge = x.pct===null ? '' : x.pct>=100 ? '<span class="badge">cumplió</span>' : x.pct>=70 ? '<span class="badge">cerca</span>' : '<span class="badge">lejos</span>';
       const metaTxt = x.pct===null ? 'sin meta asignada' : 'Meta '+fUSD(x.meta);
+      // ritmo: a este paso, ¿llega a su meta al cierre de mes? si no, cuánto debe vender por día
+      let ritmo='';
+      if(x.pct!==null && pro && pro.diasRest>0){
+        if(x.pct>=100) ritmo='<div class="ritmo ok">✓ meta cumplida</div>';
+        else {
+          const proyV = x.venta/pro.diasTrans*(pro.diasTrans+pro.diasRest);
+          ritmo = proyV>=x.meta
+            ? `<div class="ritmo ok">a este ritmo llega · proy. ${(proyV/x.meta*100).toFixed(0)}%</div>`
+            : `<div class="ritmo bad">necesita ${fUSD((x.meta-x.venta)/pro.diasRest)}/día · proy. ${(proyV/x.meta*100).toFixed(0)}%</div>`;
+        }
+      }
       return `<div class="meta-row">
-        <div class="who"><div class="nm">${nm}</div><div class="sub2">${metaTxt}</div></div>
+        <div class="who"><div class="nm">${nm}</div><div class="sub2">${metaTxt}</div>${ritmo}</div>
         <div class="meta-bar-wrap">
           <div class="meta-bar-top"><span class="real">${fUSD2(x.venta)}</span><span>${x.pct===null?'—':'de '+fUSD(x.meta)}</span></div>
           <div class="meta-bar"><div class="fill ${cls}" style="width:${w}%"></div></div>
@@ -1618,6 +1715,227 @@ function setupLayoutEditor(){
   };
 }
 setupLayoutEditor();
+
+/* ===== MODO PRESENTACIÓN =====
+   Pantalla completa estilo ejecutivo (tema oscuro) con slides navegables:
+   resumen, evolución + proyección, metas del equipo, mix y hallazgos.
+   Usa los datos con los filtros activos. Flechas ←/→ navegan, Esc sale. */
+const PRES = { open:false, idx:0, chart:null };
+const PD = { ink:'#e8edf6', mut:'#aab6cc', grid:'rgba(255,255,255,.08)' };
+
+function presKpiCard(x){
+  return `<div class="pres-kpi" style="--pc:${x.c}">
+    <div class="pl">${x.l}</div>
+    <div class="pv">${x.v}</div>
+    <div class="ps">${x.s||'&nbsp;'}</div>
+  </div>`;
+}
+function slideResumen(rows){
+  const venta=sum(rows,'tv'), margen=sum(rows,'m');
+  const docs=new Set(rows.map(r=>r.nd)).size, clis=new Set(rows.map(r=>r.cl)).size;
+  const mPct=venta?margen/venta*100:0, ticket=docs?venta/docs:0;
+  const prev=prevPeriodRows(rows);
+  let dV='',dM='',dD='',dC='';
+  if(prev){ const p=prev.rows;
+    dV=deltaBadge(venta,sum(p,'tv')); dM=deltaBadge(margen,sum(p,'m'));
+    dD=deltaBadge(docs,new Set(p.map(r=>r.nd)).size); dC=deltaBadge(clis,new Set(p.map(r=>r.cl)).size); }
+  let html='<div class="pres-kpis">'+[
+    {l:'Venta total',v:fUSD(venta),s:dV,c:'var(--amber)'},
+    {l:'Ganancia (margen)',v:fUSD(margen),s:[dM,'margen <b>'+fPct(mPct)+'</b>'].filter(Boolean).join(' · '),c:'var(--emerald)'},
+    {l:'Documentos',v:fNum(docs),s:[dD,'ticket prom. <b>'+fUSD(ticket)+'</b>'].filter(Boolean).join(' · '),c:'var(--blue)'},
+    {l:'Clientes activos',v:fNum(clis),s:dC,c:'var(--violet)'},
+  ].map(presKpiCard).join('')+'</div>';
+  if(prev) html+=`<div class="pres-note">Las flechas comparan contra el periodo anterior de igual duración (${fmtDia(prev.d1)} — ${fmtDia(prev.d2)})</div>`;
+  const pro=proyeccionDe(rows);
+  if(pro && pro.diasRest>0){
+    const conMeta=metasData(rows).filter(x=>x.pct!==null);
+    const metaTotal=conMeta.reduce((a,x)=>a+x.meta,0);
+    const cobProy=metaTotal?pro.ventaProy/metaTotal*100:0;
+    const cCob = cobProy>=100?'#34d399':cobProy>=85?'#fbbf24':'#fb7185';
+    html+=`<div class="pres-proj">
+      <div class="pp-main">
+        <div class="pl">Proyección de cierre de mes</div>
+        <div class="pv">${fUSD(pro.ventaProy)}</div>
+        <div class="ps">ritmo actual ${fUSD(pro.ritmoDia)}/día · quedan ${pro.diasRest} día${pro.diasRest>1?'s':''} del mes</div>
+      </div>
+      ${metaTotal?`<div class="pp-bar-wrap">
+        <div class="pp-lab"><span>Cobertura proyectada de la meta del equipo (${fUSD(metaTotal)})</span><b style="color:${cCob}">${cobProy.toFixed(0)}%</b></div>
+        <div class="pp-bar"><div class="fill ${cobProy>=100?'ok':cobProy>=85?'mid':'low'}" style="width:${Math.min(100,cobProy)}%"></div></div>
+      </div>`:''}
+    </div>`;
+  }
+  return html;
+}
+function slideTrendChart(rows){
+  const {labels,data}=bucketTime(rows,'d');
+  const daily=data.map(d=>+d.tv.toFixed(2));
+  let acc=0; const cum=data.map(d=>+( (acc+=d.tv) ).toFixed(2));
+  const labs=labels.slice(); const dsets=[];
+  const pro=proyeccionDe(rows);
+  if(pro && pro.diasRest>0 && pro.diasRest<=31 && cum.length>2){
+    const proj=new Array(cum.length-1).fill(null); proj.push(cum[cum.length-1]);
+    for(let k=1;k<=pro.diasRest;k++){
+      const d=addDays(pro.max,k);
+      labs.push(d.slice(8)+'/'+d.slice(5,7));
+      proj.push(+(pro.venta+pro.ritmoDia*k).toFixed(0));
+    }
+    dsets.push({type:'line',label:'Proyección',data:proj,borderColor:'#fbbf24',borderDash:[6,6],
+      borderWidth:2.5,pointRadius:0,tension:0,yAxisID:'y1'});
+  }
+  PRES.chart=new Chart($('#presC'),{data:{labels:labs,datasets:[
+    {type:'bar',label:'Venta diaria',data:daily,backgroundColor:'rgba(245,158,11,.78)',borderRadius:5,maxBarThickness:26,yAxisID:'y'},
+    {type:'line',label:'Acumulado',data:cum,borderColor:'#34d399',borderWidth:3,tension:.3,pointRadius:0,yAxisID:'y1'},
+    ...dsets]},
+    options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      plugins:{legend:{position:'top',align:'end',labels:{color:PD.ink,usePointStyle:true,boxWidth:9,padding:16,font:{size:13,weight:'700'}}},
+        tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${fUSD2(c.parsed.y)}`}}},
+      scales:{x:{grid:{display:false},border:{display:false},ticks:{color:PD.mut,maxRotation:0,autoSkip:true,maxTicksLimit:14}},
+        y:{grid:{color:PD.grid},border:{display:false},ticks:{color:PD.mut,callback:fAx}},
+        y1:{position:'right',grid:{display:false},border:{display:false},ticks:{color:'#34d399',callback:fAx}}}}});
+}
+function slideMetas(rows){
+  const arr=metasData(rows).filter(x=>x.pct!==null).slice(0,8);
+  if(!arr.length) return '<div class="pres-note">Sin vendedores con meta para los filtros activos</div>';
+  const pro=proyeccionDe(rows);
+  return '<div class="pres-metas">'+arr.map(x=>{
+    const cls=metaClass(x.pct);
+    const w=Math.max(2,Math.min(100,x.pct));
+    let ritmo='';
+    if(pro && pro.diasRest>0){
+      if(x.pct>=100) ritmo='<span class="ok">· meta cumplida ✓</span>';
+      else {
+        const proyV=x.venta/pro.diasTrans*(pro.diasTrans+pro.diasRest);
+        ritmo = proyV>=x.meta
+          ? '<span class="ok">· a este ritmo llega</span>'
+          : `<span class="bad">· necesita ${fUSD((x.meta-x.venta)/pro.diasRest)}/día</span>`;
+      }
+    }
+    return `<div class="pres-meta-row">
+      <div class="pm-who"><div class="nm">${x.v.split(' ').slice(0,2).join(' ')}</div>
+        <div class="sub">${fUSD(x.venta)} de ${fUSD(x.meta)} ${ritmo}</div></div>
+      <div class="pres-meta-bar"><div class="fill ${cls}" style="width:${w}%"></div></div>
+      <div class="pm-pct ${cls}">${x.pct.toFixed(0)}%</div>
+    </div>`;
+  }).join('')+'</div>';
+}
+function slideMix(rows){
+  const venta=sum(rows,'tv');
+  const topCli=Object.entries(groupAgg(rows,'cl')).map(([k,v])=>({k,...v})).sort((a,b)=>b.venta-a.venta).slice(0,7);
+  return `<div class="pres-cols">
+    <div class="pres-chart"><canvas id="presC"></canvas></div>
+    <div class="pres-list">
+      <div class="pl-h">Top clientes del periodo</div>
+      ${topCli.map((x,i)=>`<div class="pl-row">
+        <span class="prk ${i<3?'top':''}">${i+1}</span>
+        <span class="nm">${short(x.k,32)}</span>
+        <span class="amt">${fUSD(x.venta)}</span>
+        <span class="pct">${(x.venta/venta*100).toFixed(1)}%</span>
+      </div>`).join('')}
+    </div>
+  </div>`;
+}
+function slideMixChart(rows){
+  const arr=Object.entries(groupAgg(rows,'lf')).map(([k,v])=>({k,...v})).sort((a,b)=>b.venta-a.venta).slice(0,8).reverse();
+  PRES.chart=new Chart($('#presC'),{type:'bar',data:{labels:arr.map(x=>short(x.k,22)),datasets:[
+    {label:'Venta',data:arr.map(x=>x.venta),backgroundColor:'rgba(245,158,11,.85)',borderRadius:6,maxBarThickness:22},
+    {label:'Ganancia',data:arr.map(x=>x.margen),backgroundColor:'rgba(16,185,129,.85)',borderRadius:6,maxBarThickness:22}]},
+    options:{indexAxis:'y',maintainAspectRatio:false,
+      plugins:{legend:{position:'top',align:'end',labels:{color:PD.ink,usePointStyle:true,boxWidth:9,padding:14,font:{size:13,weight:'700'}}},
+        title:{display:true,text:'Familias que más venden',color:PD.mut,font:{size:13,weight:'700'},align:'start',padding:{bottom:10}},
+        tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${fUSD2(c.parsed.x)}`}}},
+      scales:{x:{grid:{color:PD.grid},border:{display:false},ticks:{color:PD.mut,callback:fAx}},
+        y:{grid:{display:false},border:{display:false},ticks:{color:PD.ink,font:{size:13,weight:'700'}}}}}});
+}
+function slideHallazgos(rows){
+  const venta=sum(rows,'tv'), margen=sum(rows,'m');
+  const mPct=venta?margen/venta*100:0;
+  const out=[];
+  const vAgg=Object.entries(groupAgg(rows,'v')).map(([k,v])=>({k,...v})).sort((a,b)=>b.venta-a.venta);
+  if(vAgg.length>1){
+    const top=vAgg[0];
+    out.push({c:'var(--amber)',h:`<b>${top.k.split(' ').slice(0,2).join(' ')}</b> lidera la venta con el <span class="big">${(top.venta/venta*100).toFixed(0)}%</span> del total (${fUSD(top.venta)}).`});
+  }
+  const cAgg=Object.entries(groupAgg(rows,'cl')).map(([k,v])=>({k,...v})).sort((a,b)=>b.venta-a.venta);
+  if(cAgg.length){
+    let acc=0,n80=0; for(const c of cAgg){acc+=c.venta;n80++;if(acc>=venta*0.8)break;}
+    out.push({c:'var(--blue)',h:`El <span class="big">80%</span> de la venta viene de <b>${n80} clientes</b> (de ${fNum(cAgg.length)} activos). Su fidelización es prioridad.`});
+    out.push({c:'var(--violet)',h:`Cliente #1: <b>${short(cAgg[0].k,30)}</b> con <span class="big">${fUSD(cAgg[0].venta)}</span> · ${(cAgg[0].venta/venta*100).toFixed(1)}% del total.`});
+  }
+  const lAgg=Object.entries(groupAgg(rows,'lf')).map(([k,v])=>({k,...v,mp:v.venta?v.margen/v.venta*100:0})).filter(x=>x.venta>venta*0.01);
+  if(lAgg.length>2){
+    const best=[...lAgg].sort((a,b)=>b.mp-a.mp)[0];
+    out.push({c:'var(--emerald)',h:`<b>${best.k}</b> es la familia más rentable: <span class="big">${best.mp.toFixed(0)}%</span> de margen vs ${mPct.toFixed(0)}% promedio.`});
+  }
+  const dAgg={}; rows.forEach(r=>{const x=dAgg[r.f]||(dAgg[r.f]={tv:0}); x.tv+=r.tv;});
+  const dArr=Object.entries(dAgg).sort((a,b)=>b[1].tv-a[1].tv);
+  if(dArr.length>1){
+    const dt=new Date(dArr[0][0]+'T00:00:00');
+    out.push({c:'var(--amber)',h:`Mejor día: <b>${DOW[dt.getDay()]} ${fmtDia(dArr[0][0])}</b> con <span class="big">${fUSD(dArr[0][1].tv)}</span> en ventas.`});
+  }
+  const nc=rows.filter(r=>r.doc==='NC');
+  if(nc.length) out.push({c:'var(--rose)',h:`<b>${nc.length}</b> nota${nc.length>1?'s':''} de crédito por <span class="big">${fUSD2(sum(nc,'tv'))}</span>, ya descontadas de los totales.`});
+  return '<div class="pres-ins-grid">'+out.slice(0,6).map(o=>`<div class="pres-ins" style="--pc:${o.c}">${o.h}</div>`).join('')+'</div>';
+}
+
+const PRES_SLIDES=[
+  {kicker:'Resumen ejecutivo', title:'¿Cómo va la empresa?',
+    sub:'Los números clave del periodo, comparados y proyectados', html:slideResumen},
+  {kicker:'Evolución', title:'Ritmo de venta y proyección',
+    sub:'Venta diaria, acumulado del periodo y proyección al cierre de mes',
+    html:()=> '<div class="pres-chart big"><canvas id="presC"></canvas></div>', chart:slideTrendChart},
+  {kicker:'Equipo comercial', title:'Avance de metas por vendedora',
+    sub:'Venta real contra la meta asignada, ordenado por cumplimiento', html:slideMetas},
+  {kicker:'Productos y clientes', title:'Dónde se concentra la venta',
+    sub:'Familias con mayor facturación y los clientes que más compran', html:slideMix, chart:slideMixChart},
+  {kicker:'Hallazgos', title:'Lo que hay que saber',
+    sub:'Lecturas automáticas sobre los datos del periodo', html:slideHallazgos},
+];
+
+function showSlide(i){
+  PRES.idx=(i+PRES_SLIDES.length)%PRES_SLIDES.length;
+  if(PRES.chart){ PRES.chart.destroy(); PRES.chart=null; }
+  const rows=applyFilters();
+  const s=PRES_SLIDES[PRES.idx];
+  $('#presStage').innerHTML=`<div class="pres-slide">
+    <div class="pres-kicker">${s.kicker}</div>
+    <h2 class="pres-title">${s.title}</h2>
+    ${s.sub?`<div class="pres-sub">${s.sub}</div>`:''}
+    ${s.html(rows)}
+  </div>`;
+  $('#presDots').innerHTML=PRES_SLIDES.map((_,j)=>`<button class="pres-dot ${j===PRES.idx?'on':''}" data-i="${j}" aria-label="Slide ${j+1}"></button>`).join('');
+  $('#presDots').querySelectorAll('.pres-dot').forEach(d=>d.onclick=()=>showSlide(+d.dataset.i));
+  if(s.chart) requestAnimationFrame(()=>s.chart(rows));
+}
+function openPres(){
+  PRES.open=true;
+  $('#presOv').classList.add('open');
+  document.body.style.overflow='hidden';
+  const rg=rangoDe(applyFilters());
+  $('#presPeriod').textContent = rg ? `${fmtDia(rg.min)} — ${fmtDia(rg.max)} ${rg.max.slice(0,4)}` : '';
+  showSlide(0);
+  const el=document.documentElement;
+  if(el.requestFullscreen) el.requestFullscreen().catch(()=>{});
+}
+function closePres(){
+  PRES.open=false;
+  $('#presOv').classList.remove('open');
+  document.body.style.overflow='';
+  if(PRES.chart){ PRES.chart.destroy(); PRES.chart=null; }
+  if(document.fullscreenElement) document.exitFullscreen().catch(()=>{});
+}
+$('#presentBtn') && ($('#presentBtn').onclick=openPres);
+$('#presClose') && ($('#presClose').onclick=closePres);
+$('#presPrev') && ($('#presPrev').onclick=()=>showSlide(PRES.idx-1));
+$('#presNext') && ($('#presNext').onclick=()=>showSlide(PRES.idx+1));
+document.addEventListener('keydown',e=>{
+  if(!PRES.open) return;
+  if(e.key==='Escape') closePres();
+  else if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown'){ e.preventDefault(); showSlide(PRES.idx+1); }
+  else if(e.key==='ArrowLeft'||e.key==='PageUp'){ e.preventDefault(); showSlide(PRES.idx-1); }
+});
+
+// Informe imprimible / PDF (usa el diálogo de impresión del navegador)
+$('#printBtn') && ($('#printBtn').onclick=()=>window.print());
 
 /* ===== GO ===== */
 buildSelectors();
